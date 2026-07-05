@@ -35,6 +35,7 @@ build/
 .vscode/
 .idea/
 .gh/
+.git-askpass-gh.cmd
 *.swp
 *.swo
 
