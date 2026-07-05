@@ -34,6 +34,7 @@ build/
 # IDE
 .vscode/
 .idea/
+.gh/
 *.swp
 *.swo
 
