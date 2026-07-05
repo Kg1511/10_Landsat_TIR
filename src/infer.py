@@ -17,6 +17,7 @@ from rasterio.transform import Affine, from_origin
 
 from src.config import DEVICE, PREPROCESS_STATS_PATH, UNET_USE_TANH
 from src.models.rrdb import RRDBNet
+from src.models.tiny_vit import TinyViTColorNet
 from src.models.unet import UNetGenerator
 from src.preprocessing import load_preprocess_stats
 from src.utils import load_checkpoint, setup_logger
@@ -152,6 +153,7 @@ def run_inference(
     output_dir: str,
     sr_ckpt: str = "sr_stage2_best.pth",
     color_ckpt: str = "color_best.pth",
+    color_model_name: str = "unet",
     stats_path: str = PREPROCESS_STATS_PATH,
 ):
     """Full inference: TIR input -> SR TIR Kelvin -> colorized RGB/BGR outputs."""
@@ -196,9 +198,14 @@ def run_inference(
     logger.info(f"Saved SR TIR: {sr_path}")
 
     logger.info("Loading colorization model...")
-    color_model = UNetGenerator().to(DEVICE)
+    if color_model_name == "tiny_vit":
+        color_model = TinyViTColorNet().to(DEVICE)
+        color_state_key = "model"
+    else:
+        color_model = UNetGenerator().to(DEVICE)
+        color_state_key = "generator"
     color_ckpt_data = load_checkpoint(color_ckpt, map_location=DEVICE)
-    color_model.load_state_dict(color_ckpt_data["generator"])
+    color_model.load_state_dict(color_ckpt_data[color_state_key])
 
     logger.info("Running colorization...")
     t0 = time.time()
@@ -227,10 +234,18 @@ def main():
     parser.add_argument("--output", type=str, default="output", help="Output directory")
     parser.add_argument("--sr_ckpt", type=str, default="sr_stage2_best.pth", help="SR checkpoint filename")
     parser.add_argument("--color_ckpt", type=str, default="color_best.pth", help="Colorization checkpoint filename")
+    parser.add_argument("--color_model", type=str, default="unet", choices=["unet", "tiny_vit"])
     parser.add_argument("--stats", type=str, default=PREPROCESS_STATS_PATH, help="preprocess_stats.json path")
     args = parser.parse_args()
 
-    run_inference(args.input, args.output, args.sr_ckpt, args.color_ckpt, args.stats)
+    run_inference(
+        args.input,
+        args.output,
+        args.sr_ckpt,
+        args.color_ckpt,
+        args.color_model,
+        args.stats,
+    )
 
 
 if __name__ == "__main__":

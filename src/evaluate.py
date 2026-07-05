@@ -31,6 +31,7 @@ from src.data.sr_dataset import SRDataset
 from src.data.color_dataset import ColorizationDataset
 from src.models.rrdb import RRDBNet
 from src.models.unet import UNetGenerator
+from src.models.tiny_vit import TinyViTColorNet
 from src.utils import (
     setup_logger,
     load_checkpoint,
@@ -233,14 +234,86 @@ def evaluate_colorization(ckpt_name: str):
 #  CLI
 # ────────────────────────────────────────────────────────
 
+@torch.no_grad()
+def evaluate_tiny_vit(ckpt_name: str):
+    logger.info("=" * 60)
+    logger.info("Evaluating TinyViT Colorization on test set")
+
+    test_ds = ColorizationDataset(DATASET_ROOT, "test", augment=False)
+    stats = test_ds.stats
+    test_loader = DataLoader(
+        test_ds,
+        batch_size=1,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=PIN_MEMORY,
+    )
+
+    model = TinyViTColorNet().to(DEVICE)
+    ckpt = load_checkpoint(ckpt_name, map_location=DEVICE)
+    model.load_state_dict(ckpt["model"])
+    model.eval()
+
+    results = []
+    psnrs, ssims = [], []
+    vis_dir = os.path.join(OUTPUT_DIR, "tiny_vit_eval_vis")
+    os.makedirs(vis_dir, exist_ok=True)
+
+    for i, (tir, rgb_gt, names) in enumerate(test_loader):
+        tir = tir.to(DEVICE)
+        rgb_gt = rgb_gt.to(DEVICE)
+        rgb_pred = model(tir)
+
+        pred_01 = denormalize_rgb(rgb_pred, stats).clamp(0, 1)
+        gt_01 = denormalize_rgb(rgb_gt, stats).clamp(0, 1)
+        pred_np = tensor_to_numpy(pred_01)[0].transpose(1, 2, 0)
+        gt_np = tensor_to_numpy(gt_01)[0].transpose(1, 2, 0)
+        tir_np = stats.tir_to_display_array(tensor_to_numpy(tir)[0, 0])
+
+        p = psnr_fn(gt_np, pred_np, data_range=1.0)
+        s = ssim_fn(gt_np, pred_np, data_range=1.0, channel_axis=2)
+        psnrs.append(p)
+        ssims.append(s)
+        results.append({"name": names[0], "psnr": p, "ssim": s})
+
+        if i < 10:
+            create_color_comparison(
+                tir_np,
+                pred_np.transpose(2, 0, 1),
+                gt_np.transpose(2, 0, 1),
+                save_path=os.path.join(vis_dir, f"tiny_vit_test_{i:03d}.png"),
+                title=f"{names[0]} - PSNR {p:.2f}",
+            )
+
+    mean_psnr = np.mean(psnrs)
+    mean_ssim = np.mean(ssims)
+    logger.info(f"  Test samples : {len(results)}")
+    logger.info(f"  PSNR (mean)  : {mean_psnr:.2f} dB")
+    logger.info(f"  SSIM (mean)  : {mean_ssim:.4f}")
+
+    dummy = torch.randn(1, 1, 256, 256, device=DEVICE)
+    t_mean, t_std = measure_inference_time(model, dummy)
+    logger.info(f"  Inference    : {t_mean:.1f} +/- {t_std:.1f} ms/tile")
+
+    csv_path = os.path.join(OUTPUT_DIR, "tiny_vit_eval_results.csv")
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["name", "psnr", "ssim"])
+        writer.writeheader()
+        writer.writerows(results)
+    logger.info(f"  Results CSV  : {csv_path}")
+
+    return mean_psnr, mean_ssim
+
+
 def main():
     parser = argparse.ArgumentParser(description="Evaluate SR / Colorization models")
     parser.add_argument("--task", type=str, default="both",
-                        choices=["sr", "color", "both"])
+                        choices=["sr", "color", "vit", "both"])
     parser.add_argument("--checkpoint", type=str, default=None,
                         help="Checkpoint for single-task eval")
     parser.add_argument("--sr_ckpt", type=str, default="sr_stage2_best.pth")
     parser.add_argument("--color_ckpt", type=str, default="color_best.pth")
+    parser.add_argument("--vit_ckpt", type=str, default="color_tiny_transformer_best.pth")
     args = parser.parse_args()
 
     if args.task == "sr":
@@ -249,9 +322,13 @@ def main():
     elif args.task == "color":
         ckpt = args.checkpoint or args.color_ckpt
         evaluate_colorization(ckpt)
+    elif args.task == "vit":
+        ckpt = args.checkpoint or args.vit_ckpt
+        evaluate_tiny_vit(ckpt)
     else:
         evaluate_sr(args.sr_ckpt)
         evaluate_colorization(args.color_ckpt)
+        evaluate_tiny_vit(args.vit_ckpt)
 
 
 if __name__ == "__main__":

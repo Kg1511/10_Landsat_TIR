@@ -133,6 +133,20 @@ COLOR_LOSS_WEIGHTS = {
     "ssim": 5.0,
 }
 
+# Tiny transformer colorization baseline
+VIT_PATCH_SIZE = 16
+VIT_EMBED_DIM = 192
+VIT_DEPTH = 4
+VIT_HEADS = 6
+VIT_MLP_RATIO = 4.0
+VIT_BATCH_SIZE = 4
+VIT_LR = 2e-4
+VIT_EPOCHS = 15
+VIT_LOSS_WEIGHTS = {
+    "l1": 1.0,
+    "ssim": 1.0,
+}
+
 # ──────────────────────────────────────────────
 # Mixed precision
 # ──────────────────────────────────────────────

@@ -1,145 +1,150 @@
-# TIR Super-Resolution & Colorization Pipeline
+# Landsat-9 TIR Super-Resolution and Colorization
 
-**SAC / ISRO — Bharatiya Antariksh Hackathon 2026**
+SAC / ISRO Bharatiya Antariksh Hackathon project for raw thermal infrared
+enhancement and colorization.
 
-Two-stage deep learning pipeline for Landsat 9 Thermal Infrared imagery:
-1. **Super-Resolution** — TIR 200m → 100m (×2 upscale) using an RRDB/ESRGAN generator
-2. **Colorization** — TIR 100m → RGB 100m using a Pix2Pix cGAN (U-Net + PatchGAN)
+The pipeline uses original `.npy` or GeoTIFF sensor values as model input. Plot
+stretching, colormaps, screenshots, and other visualization outputs are kept out
+of training and inference.
 
----
+## What This Project Does
 
-## Quick Start
+1. Super-resolves Landsat-9 TIR 200 m patches to TIR 100 m output.
+2. Colorizes TIR 100 m patches into RGB-like 100 m output.
+3. Saves and reuses `checkpoints/preprocess_stats.json` for reproducible model
+   preprocessing.
+4. Supports RRDB super-resolution, Pix2Pix/U-Net colorization, and TinyViT
+   colorization comparison.
+5. Exports final arrays and challenge-style BGR GeoTIFF outputs.
 
-### 1. Install dependencies
+## Project Layout
+
+```text
+src/
+  config.py                       Central paths and hyperparameters
+  preprocessing.py                Train-set stats and normalization helpers
+  dataset_sanity.py               Dataset pair, shape, and stats checks
+  train_sr.py                     RRDB super-resolution training
+  train_colorization.py           Pix2Pix/U-Net colorization training
+  train_transformer_colorization.py TinyViT colorization training
+  evaluate.py                     SR, U-Net, and TinyViT evaluation
+  infer.py                        End-to-end SR + colorization inference
+  export_models.py                TorchScript / ONNX export
+  data/                           Dataset loaders
+  models/                         RRDB, U-Net, PatchGAN, TinyViT, losses
+docs/
+  ISRO_Landsat9_SR_Colorization_Project_Documentation.md
+```
+
+## Dataset Format
+
+Set `DATASET_ROOT` in `src/config.py`, or place the dataset at:
+
+```text
+dataset_current_repo_format/
+  sr/
+    train/tir_200m/*.npy
+    train/tir_100m/*.npy
+    val/tir_200m/*.npy
+    val/tir_100m/*.npy
+    test/tir_200m/*.npy
+    test/tir_100m/*.npy
+  colorization/
+    train/tir_100m/*.npy
+    train/rgb_100m/*.npy
+    val/tir_100m/*.npy
+    val/rgb_100m/*.npy
+    test/tir_100m/*.npy
+    test/rgb_100m/*.npy
+```
+
+Expected shapes:
+
+```text
+SR input:       (256, 256)
+SR target:      (512, 512)
+Color input:    (256, 256)
+Color target:   (3, 256, 256)
+```
+
+## Setup
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Set dataset path
+## Run Order
 
-Edit `src/config.py` and set `DATASET_ROOT` to point to your local dataset folder containing `sr/`, `colorization/`, and `metadata/` subdirectories.
-
-### 3. Train Super-Resolution
+First validate the dataset and create preprocessing stats:
 
 ```bash
-# Stage 1 — Pixel-only L1 loss (~100 epochs)
-python -m src.train_sr --stage 1
+python -m src.dataset_sanity --write-stats
+```
 
-# Stage 2 — L1 + Perceptual + GAN + Physics (~100 epochs)
+This writes:
+
+```text
+checkpoints/preprocess_stats.json
+output/dataset_sanity_report.json
+```
+
+Train the SR model:
+
+```bash
+python -m src.train_sr --stage 1
 python -m src.train_sr --stage 2
 ```
 
-### 4. Train Colorization
+Train colorization models:
 
 ```bash
 python -m src.train_colorization
+python -m src.train_transformer_colorization
 ```
 
-### 5. Evaluate
+Evaluate:
 
 ```bash
 python -m src.evaluate --task both
 ```
 
-### 6. Run Inference
+Run final inference:
 
 ```bash
-python -m src.infer --input path/to/scene_B10.tif --output output/
+python -m src.infer --input path/to/tir_200m.tif --output output
 ```
 
----
+Use TinyViT instead of U-Net colorization:
 
-## Project Structure
-
-```
-src/
-├── config.py              — Central configuration (paths, hyperparameters)
-├── data/
-│   ├── sr_dataset.py      — SR dataset loader (TIR 200m → 100m)
-│   └── color_dataset.py   — Colorization dataset loader (TIR → RGB)
-├── models/
-│   ├── rrdb.py            — RRDB generator (ESRGAN-style)
-│   ├── unet.py            — U-Net generator (Pix2Pix)
-│   ├── discriminator.py   — PatchGAN discriminator
-│   └── losses.py          — L1, VGG perceptual, GAN, SSIM, physics losses
-├── train_sr.py            — Two-stage SR training
-├── train_colorization.py  — Pix2Pix cGAN training
-├── evaluate.py            — PSNR, SSIM, FID evaluation
-├── infer.py               — End-to-end tiled inference + GeoTIFF output
-└── utils.py               — Checkpointing, logging, visualization
+```bash
+python -m src.infer --input path/to/tir_200m.tif --output output --color_model tiny_vit --color_ckpt color_tiny_transformer_best.pth
 ```
 
----
+Export trained models:
 
-## Dataset Format
-
-```
-dataset_current_repo_format/
-├── sr/
-│   ├── train/
-│   │   ├── tir_200m/   ← .npy (256×256)
-│   │   └── tir_100m/   ← .npy (512×512)
-│   ├── val/
-│   └── test/
-├── colorization/
-│   ├── train/
-│   │   ├── tir_100m/   ← .npy (256×256)
-│   │   └── rgb_100m/   ← .npy (3×256×256, R,G,B)
-│   ├── val/
-│   └── test/
-└── metadata/
-    ├── patch_metadata.csv
-    └── scene_summary.csv
+```bash
+python -m src.export_models --task sr --checkpoint sr_stage2_best.pth
+python -m src.export_models --task color --checkpoint color_best.pth
+python -m src.export_models --task vit --checkpoint color_tiny_transformer_best.pth
 ```
 
----
+## Outputs
 
-## Model Architectures
+Inference writes:
 
-### Super-Resolution — RRDB (ESRGAN-style)
-- 23 Residual-in-Residual Dense Blocks
-- PixelShuffle ×2 upsampling
-- Physics constraint: AvgPool(SR) ≈ LR (preserves radiometric fidelity)
-
-### Colorization — Pix2Pix cGAN
-- U-Net generator: 8-layer encoder/decoder with skip connections
-- PatchGAN discriminator (70×70 receptive field)
-- Instance normalisation, spectral normalisation
-- Multi-loss: GAN + 100×L1 + 10×perceptual + 5×SSIM
-
----
-
-## Inference Output
-
-```
-output/
-└── model_outputs/
-    ├── tir_superresolved_100m/
-    │   └── <product_id>.tif      ← Single-band TIR (Kelvin)
-    └── colorized_tir_100m/
-        └── <product_id>.tif      ← 3-band BGR GeoTIFF
+```text
+output/model_outputs/tir_superresolved_100m/<product_id>.tif
+output/model_outputs/colorized_tir_100m/<product_id>.tif
+output/model_outputs/arrays/<product_id>_pred_tir100m.npy
+output/model_outputs/arrays/<product_id>_pred_rgb_chw.npy
 ```
 
-> **Note:** Colorized output uses BGR band order per challenge specification.
+The colorized GeoTIFF is saved in BGR band order for the challenge output
+format. The `.npy` RGB array remains channel-first RGB.
 
----
+## Raw Sensor Value Rule
 
-## Evaluation Targets
-
-| Metric | Task | Target |
-|--------|------|--------|
-| PSNR | Super-Resolution | >30 dB |
-| PSNR | Colorization | >25 dB |
-| SSIM | Super-Resolution | >0.85 |
-| FID | Colorization | <20 |
-| Inference | Per tile | <100 ms |
-
----
-
-## References
-
-- [ESRGAN](https://arxiv.org/abs/1809.00219) — Wang et al., ECCV 2018 Workshops
-- [Pix2Pix](https://arxiv.org/abs/1611.07004) — Isola et al., CVPR 2017
-- [Challenge Repository](https://github.com/jugal-sac/IR-colorization-BAH2026)
-- Landsat 9 Collection 2 Level-2 via Google Earth Engine
+Training and inference use original arrays only. Visualization helpers can make
+human-readable figures, but those figures are never passed back into the model.
+The saved preprocessing stats define the numeric transform used across training,
+evaluation, and final inference.
