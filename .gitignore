@@ -15,11 +15,16 @@ dataset_current_repo_format/
 landsat_india_200/
 outputs/
 output/
+dashboard_runs/
+uploads/
 checkpoints/
 runs/
 wandb/
 logs/
 tmp/
+apps/dashboard/backend/outputs/
+apps/dashboard/backend/uploads/
+apps/dashboard/backend/dashboard_runs/
 
 # Python
 __pycache__/
@@ -27,6 +32,8 @@ __pycache__/
 *.pyo
 .ipynb_checkpoints/
 .env
+.venv/
+venv/
 *.egg-info/
 dist/
 build/

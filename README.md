@@ -77,6 +77,45 @@ pip install -r requirements.txt
 
 Set `DATASET_ROOT` in `src/config.py`, or pass `--dataset-root` / `--root` where available.
 
+## Deployable Dashboard
+
+A real API-backed dashboard is included at `apps/dashboard/`.
+
+```bash
+pip install -r apps/dashboard/backend/requirements.txt
+uvicorn apps.dashboard.backend.main:app --host 127.0.0.1 --port 8000
+```
+
+Then open:
+
+```text
+http://127.0.0.1:8000
+```
+
+The dashboard validates raw `.npy` TIR uploads with shape `(256, 256)`, runs the
+same final two-stage inference path used by the notebook-aligned scripts, shows
+Raw TIR / SR TIR / RGB-like output panels, and provides downloads for:
+
+```text
+*_pred_tir100m_512.npy
+*_pred_rgb_chw_original_scale.npy
+*_pred_bgr_chw.tif
+*_preview.png
+inference_manifest.json
+```
+
+Production dashboard inference requires these files under `SAVE_DIR`:
+
+```text
+preprocess_stats.json
+sr_cnn_residual_original_sensor_values.pth
+color_cnn_unet_original_sensor_values.pth
+```
+
+GAN and Transformer dashboard modes additionally need their matching comparison
+checkpoints. See `apps/dashboard/README.md` for environment variables, demo
+mode, Docker, and deployment notes.
+
 ## Exact Run Order
 
 1. Dataset sanity check and preprocessing stats:

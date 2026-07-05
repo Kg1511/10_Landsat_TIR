@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Landsat-9 TIR Dashboard</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main class="page">
+      <div class="shell">
+        <header class="hero">
+          <div class="hero-copy">
+            <p class="eyebrow">Notebook-aligned inference</p>
+            <h1>Landsat-9 TIR Super-Resolution &amp; Colorization Dashboard</h1>
+            <p class="subtitle">
+              Original sensor-value inference: Raw TIR 200m &rarr; SR TIR 100m &rarr; RGB-like colorized output
+            </p>
+          </div>
+          <div id="statusBadge" class="status-badge loading">Loading</div>
+        </header>
+
+        <section class="top-grid">
+          <article class="card upload-card">
+            <div class="card-heading">
+              <div>
+                <h2>Upload Raw TIR</h2>
+                <p>Accepted input: original sensor-value .npy, shape 256 x 256.</p>
+              </div>
+            </div>
+
+            <div id="dropzone" class="dropzone" tabindex="0" role="button" aria-label="Choose raw TIR .npy file">
+              <input id="fileInput" type="file" accept=".npy" />
+              <div class="dropzone-title">Drop .npy file here</div>
+              <div class="dropzone-subtitle">PNG, JPG, TIFF, and pseudo-color previews are rejected.</div>
+            </div>
+
+            <div class="file-row">
+              <span class="label">File</span>
+              <span id="fileName" class="value muted">No file selected</span>
+            </div>
+
+            <div class="summary-grid">
+              <div>
+                <span class="label">Shape</span>
+                <span id="shapeValue" class="value">-</span>
+              </div>
+              <div>
+                <span class="label">Dtype</span>
+                <span id="dtypeValue" class="value">-</span>
+              </div>
+              <div>
+                <span class="label">Min</span>
+                <span id="minValue" class="value">-</span>
+              </div>
+              <div>
+                <span class="label">Max</span>
+                <span id="maxValue" class="value">-</span>
+              </div>
+              <div>
+                <span class="label">Mean</span>
+                <span id="meanValue" class="value">-</span>
+              </div>
+              <div>
+                <span class="label">Std</span>
+                <span id="stdValue" class="value">-</span>
+              </div>
+            </div>
+
+            <div id="validationMessage" class="validation neutral">Waiting for upload</div>
+          </article>
+
+          <article class="card controls-card">
+            <div class="card-heading">
+              <div>
+                <h2>Final Pipeline</h2>
+                <p>Default path: CNN SR + CNN U-Net colorization.</p>
+              </div>
+            </div>
+
+            <label class="field">
+              <span>Color model</span>
+              <select id="modelSelect">
+                <option value="cnn" selected>cnn</option>
+                <option value="gan">gan</option>
+                <option value="transformer">transformer</option>
+              </select>
+            </label>
+
+            <label class="check-row">
+              <input id="savePreview" type="checkbox" checked />
+              <span>Save preview PNG</span>
+            </label>
+
+            <label class="check-row">
+              <input id="includeNpy" type="checkbox" checked />
+              <span>Include original-scale .npy outputs</span>
+            </label>
+
+            <button id="runButton" class="primary-button" type="button" disabled>
+              Run Final Pipeline
+            </button>
+
+            <div class="runtime-note">
+              Production mode requires checkpoints and preprocess_stats.json. Demo mode is marked in logs.
+            </div>
+          </article>
+        </section>
+
+        <section class="output-grid" aria-label="Output comparison">
+          <article class="card output-card">
+            <div class="output-title">
+              <h2>Raw TIR Input</h2>
+              <span id="rawShape" class="pill">256 x 256</span>
+            </div>
+            <div class="preview-box">
+              <img id="rawPreview" alt="Raw TIR preview" hidden />
+              <div id="rawEmpty" class="empty-preview">Awaiting run</div>
+            </div>
+            <div class="output-meta">
+              <span>Range</span>
+              <strong id="rawRange">-</strong>
+            </div>
+          </article>
+
+          <article class="card output-card">
+            <div class="output-title">
+              <h2>Super-Resolved TIR 100m</h2>
+              <span id="srShape" class="pill">512 x 512</span>
+            </div>
+            <div class="preview-box">
+              <img id="srPreview" alt="Super-resolved TIR preview" hidden />
+              <div id="srEmpty" class="empty-preview">Awaiting run</div>
+            </div>
+            <div class="output-meta">
+              <span>Range</span>
+              <strong id="srRange">-</strong>
+            </div>
+          </article>
+
+          <article class="card output-card">
+            <div class="output-title">
+              <h2>Colorized RGB-like Output</h2>
+              <span id="rgbShape" class="pill">3 x 512 x 512</span>
+            </div>
+            <div class="preview-box">
+              <img id="rgbPreview" alt="Colorized RGB-like preview" hidden />
+              <div id="rgbEmpty" class="empty-preview">Awaiting run</div>
+            </div>
+            <div class="output-meta">
+              <span>Range</span>
+              <strong id="rgbRange">-</strong>
+            </div>
+          </article>
+        </section>
+
+        <section class="bottom-grid">
+          <article class="card downloads-card">
+            <div class="card-heading">
+              <div>
+                <h2>Exports</h2>
+                <p>Numerical outputs and display-only previews from the current run.</p>
+              </div>
+            </div>
+            <div id="downloadList" class="download-list"></div>
+          </article>
+
+          <article class="card logs-card">
+            <div class="card-heading">
+              <div>
+                <h2>Run Logs</h2>
+                <p id="runIdText">No run yet</p>
+              </div>
+            </div>
+            <pre id="logsPanel" class="logs">Waiting for upload</pre>
+          </article>
+        </section>
+      </div>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
