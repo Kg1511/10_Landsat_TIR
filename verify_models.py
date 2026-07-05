@@ -36,6 +36,21 @@ print("  Output: {}".format(list(y.shape)))
 assert y.shape == (1, 3, 256, 256), "BAD SHAPE: {}".format(y.shape)
 print("  PASS")
 
+# -- TinyViT Colorization Model --
+print("\n--- TinyViT Colorization Model ---")
+from src.models.tiny_vit import TinyViTColorNet
+vit_model = TinyViTColorNet()
+params = sum(p.numel() for p in vit_model.parameters() if p.requires_grad)
+print("  Parameters: {:,}".format(params))
+
+x = torch.randn(1, 1, 256, 256)
+with torch.no_grad():
+    y = vit_model(x)
+print("  Input:  {}".format(list(x.shape)))
+print("  Output: {}".format(list(y.shape)))
+assert y.shape == (1, 3, 256, 256), "BAD SHAPE: {}".format(y.shape)
+print("  PASS")
+
 # -- PatchGAN Discriminator --
 print("\n--- PatchGAN Discriminator ---")
 from src.models.discriminator import PatchGANDiscriminator
