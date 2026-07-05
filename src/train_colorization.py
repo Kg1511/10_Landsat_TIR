@@ -64,6 +64,7 @@ def validate(generator, val_loader, device, epoch, save_dir=None):
     generator.eval()
     psnr_meter = AverageMeter()
     ssim_meter = AverageMeter()
+    stats = getattr(val_loader.dataset, "stats", None)
 
     for i, (tir, rgb_gt, names) in enumerate(val_loader):
         tir = tir.to(device)
@@ -72,8 +73,8 @@ def validate(generator, val_loader, device, epoch, save_dir=None):
         rgb_pred = generator(tir)
 
         # Denormalise to [0, 1] for metrics
-        rgb_pred_01 = denormalize_rgb(rgb_pred).clamp(0, 1)
-        rgb_gt_01 = denormalize_rgb(rgb_gt).clamp(0, 1)
+        rgb_pred_01 = denormalize_rgb(rgb_pred, stats).clamp(0, 1)
+        rgb_gt_01 = denormalize_rgb(rgb_gt, stats).clamp(0, 1)
 
         pred_np = tensor_to_numpy(rgb_pred_01)
         gt_np = tensor_to_numpy(rgb_gt_01)
@@ -91,8 +92,9 @@ def validate(generator, val_loader, device, epoch, save_dir=None):
         if i == 0 and save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             tir_np = tensor_to_numpy(tir)
+            tir_display = stats.tir_to_display_array(tir_np[0, 0])
             create_color_comparison(
-                tir_np[0, 0],
+                tir_display,
                 pred_np[0],
                 gt_np[0],
                 save_path=os.path.join(save_dir, f"color_val_epoch{epoch:03d}.png"),
@@ -115,6 +117,7 @@ def train(args):
     # Data
     train_ds = ColorizationDataset(DATASET_ROOT, "train", augment=True)
     val_ds = ColorizationDataset(DATASET_ROOT, "val", augment=False)
+    stats = train_ds.stats
     train_loader = DataLoader(
         train_ds, batch_size=COLOR_BATCH_SIZE, shuffle=True,
         num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY, drop_last=True,
@@ -197,8 +200,8 @@ def train(args):
                     fake_pair = torch.cat([tir, rgb_pred], dim=1)
 
                     # For perceptual / SSIM, work in [0,1] space
-                    pred_01 = denormalize_rgb(rgb_pred) if UNET_USE_TANH else rgb_pred
-                    gt_01 = denormalize_rgb(rgb_gt) if UNET_USE_TANH else rgb_gt
+                    pred_01 = denormalize_rgb(rgb_pred, stats) if UNET_USE_TANH else rgb_pred
+                    gt_01 = denormalize_rgb(rgb_gt, stats) if UNET_USE_TANH else rgb_gt
 
                     loss_G = (
                         w["adversarial"] * gan_fn(discriminator(fake_pair), True) +
@@ -234,6 +237,7 @@ def train(args):
             "optimizer_G": opt_G.state_dict(),
             "optimizer_D": opt_D.state_dict(),
             "best_psnr": best_psnr,
+            "preprocess_stats": stats.to_dict(),
         }
         save_checkpoint(state, "color_latest.pth")
         if is_best:

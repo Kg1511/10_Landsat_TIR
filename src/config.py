@@ -6,7 +6,11 @@ every training / evaluation / inference script imports from one place.
 """
 
 import os
-import torch
+
+try:
+    import torch
+except ModuleNotFoundError:
+    torch = None
 
 # ──────────────────────────────────────────────
 # Paths  (update DATASET_ROOT to your local copy)
@@ -19,6 +23,7 @@ DATASET_ROOT = os.path.join(PROJECT_ROOT, "dataset_current_repo_format")
 CHECKPOINT_DIR = os.path.join(PROJECT_ROOT, "checkpoints")
 OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 LOG_DIR = os.path.join(PROJECT_ROOT, "runs")
+PREPROCESS_STATS_PATH = os.path.join(CHECKPOINT_DIR, "preprocess_stats.json")
 
 # Submission output layout required by the challenge
 SR_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "model_outputs", "tir_superresolved_100m")
@@ -30,15 +35,18 @@ for _d in [CHECKPOINT_DIR, OUTPUT_DIR, LOG_DIR, SR_OUTPUT_DIR, COLOR_OUTPUT_DIR]
 # ──────────────────────────────────────────────
 # Device
 # ──────────────────────────────────────────────
-if torch.cuda.is_available():
+if torch is None:
+    DEVICE = "cpu"
+elif torch.cuda.is_available():
     DEVICE = torch.device("cuda")
 elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
     DEVICE = torch.device("mps")
 else:
     DEVICE = torch.device("cpu")
 
-NUM_WORKERS = 2 if DEVICE.type == "cuda" else 0
-PIN_MEMORY = DEVICE.type == "cuda"
+DEVICE_TYPE = DEVICE.type if hasattr(DEVICE, "type") else "cpu"
+NUM_WORKERS = 2 if DEVICE_TYPE == "cuda" else 0
+PIN_MEMORY = DEVICE_TYPE == "cuda"
 
 # ──────────────────────────────────────────────
 # Data constants  (from dataset documentation)
@@ -128,7 +136,7 @@ COLOR_LOSS_WEIGHTS = {
 # ──────────────────────────────────────────────
 # Mixed precision
 # ──────────────────────────────────────────────
-USE_AMP = DEVICE.type == "cuda"
+USE_AMP = DEVICE_TYPE == "cuda"
 
 # ──────────────────────────────────────────────
 # Evaluation targets  (for reference / logging)
