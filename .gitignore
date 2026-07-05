@@ -1,0 +1,42 @@
+# Data outputs
+*.npy
+*.tif
+*.tiff
+*.zip
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Folders
+dataset/
+dataset_current/
+dataset_current_repo_format/
+landsat_india_200/
+outputs/
+output/
+checkpoints/
+runs/
+wandb/
+logs/
+tmp/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+.env
+*.egg-info/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store

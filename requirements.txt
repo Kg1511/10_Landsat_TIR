@@ -1,0 +1,11 @@
+torch>=2.0
+torchvision>=0.15
+numpy
+scikit-image
+matplotlib
+rasterio
+tifffile
+opencv-python
+pytorch-fid
+tensorboard
+tqdm
