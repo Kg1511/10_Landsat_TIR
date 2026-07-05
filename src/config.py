@@ -25,6 +25,13 @@ OUTPUT_DIR = os.path.join(PROJECT_ROOT, "output")
 LOG_DIR = os.path.join(PROJECT_ROOT, "runs")
 PREPROCESS_STATS_PATH = os.path.join(CHECKPOINT_DIR, "preprocess_stats.json")
 
+# Notebook-aligned checkpoint names.
+SR_CNN_CHECKPOINT = "sr_cnn_residual_original_sensor_values.pth"
+COLOR_CNN_CHECKPOINT = "color_cnn_unet_original_sensor_values.pth"
+COLOR_GAN_CHECKPOINT = "color_pix2pix_original_sensor_values.pth"
+COLOR_VIT_CHECKPOINT = "color_tiny_transformer_original_sensor_values.pth"
+MODEL_COMPARISON_JSON = "model_comparison_metrics.json"
+
 # Submission output layout required by the challenge
 SR_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "model_outputs", "tir_superresolved_100m")
 COLOR_OUTPUT_DIR = os.path.join(OUTPUT_DIR, "model_outputs", "colorized_tir_100m")
@@ -84,7 +91,7 @@ COLOR_IN_CHANNELS = 1
 COLOR_OUT_CHANNELS = 3
 UNET_FEATURES = [64, 128, 256, 512, 512, 512, 512, 512]
 UNET_DROPOUT = 0.5      # applied in first 3 decoder blocks
-UNET_USE_TANH = True     # output in [-1, 1], rescaled to [0, 1] at inference
+UNET_USE_TANH = False    # notebook-aligned default uses sigmoid RGB in [0, 1]
 
 # PatchGAN discriminator
 DISC_IN_CHANNELS = COLOR_IN_CHANNELS + COLOR_OUT_CHANNELS  # 4: TIR + RGB
@@ -93,19 +100,19 @@ DISC_FEATURES = [64, 128, 256, 512]
 # ──────────────────────────────────────────────
 # Training — Super-Resolution
 # ──────────────────────────────────────────────
-SR_BATCH_SIZE = 8
+SR_BATCH_SIZE = 4
 SR_LR_G = 2e-4
 SR_BETA1 = 0.9
 SR_BETA2 = 0.99
 
 # Stage 1: pixel-loss only
-SR_STAGE1_EPOCHS = 100
+SR_STAGE1_EPOCHS = 10
 SR_STAGE1_LOSS_WEIGHTS = {
     "l1": 1.0,
 }
 
 # Stage 2: pixel + perceptual + adversarial + physics
-SR_STAGE2_EPOCHS = 100
+SR_STAGE2_EPOCHS = 10
 SR_STAGE2_LOSS_WEIGHTS = {
     "l1": 1.0,
     "perceptual": 0.1,
@@ -123,7 +130,7 @@ COLOR_LR_G = 2e-4
 COLOR_LR_D = 2e-4
 COLOR_BETA1 = 0.5
 COLOR_BETA2 = 0.999
-COLOR_EPOCHS = 200
+COLOR_EPOCHS = 15
 COLOR_G_UPDATES_PER_D = 2  # train G twice per D update
 
 COLOR_LOSS_WEIGHTS = {
@@ -135,16 +142,36 @@ COLOR_LOSS_WEIGHTS = {
 
 # Tiny transformer colorization baseline
 VIT_PATCH_SIZE = 16
-VIT_EMBED_DIM = 192
+VIT_EMBED_DIM = 128
 VIT_DEPTH = 4
-VIT_HEADS = 6
+VIT_HEADS = 4
 VIT_MLP_RATIO = 4.0
 VIT_BATCH_SIZE = 4
 VIT_LR = 2e-4
 VIT_EPOCHS = 15
 VIT_LOSS_WEIGHTS = {
     "l1": 1.0,
-    "ssim": 1.0,
+}
+
+SMOKE_TEST_EPOCHS = {
+    "sr": 2,
+    "color_cnn": 2,
+    "gan": 1,
+    "vit": 1,
+}
+
+QUICK_RUN_EPOCHS = {
+    "sr": 5,
+    "color_cnn": 5,
+    "gan": 2,
+    "vit": 2,
+}
+
+FINAL_RUN_EPOCHS = {
+    "sr": 20,
+    "color_cnn": 25,
+    "gan": 10,
+    "vit": 15,
 }
 
 # ──────────────────────────────────────────────

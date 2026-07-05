@@ -14,7 +14,12 @@ import torch
 from torch.utils.data import Dataset
 
 from src.config import COLOR_SIZE, DATASET_ROOT, PREPROCESS_STATS_PATH, UNET_USE_TANH
-from src.preprocessing import PreprocessStats, load_preprocess_stats
+from src.preprocessing import (
+    PreprocessStats,
+    ensure_rgb_chw,
+    load_preprocess_stats,
+    safe_load_npy,
+)
 
 
 class ColorizationDataset(Dataset):
@@ -77,8 +82,8 @@ class ColorizationDataset(Dataset):
     def __getitem__(self, idx):
         fname = self.files[idx]
 
-        tir = np.load(os.path.join(self.tir_dir, fname)).astype(np.float32)
-        rgb = np.load(os.path.join(self.rgb_dir, fname)).astype(np.float32)
+        tir = safe_load_npy(os.path.join(self.tir_dir, fname))
+        rgb = ensure_rgb_chw(safe_load_npy(os.path.join(self.rgb_dir, fname)))
 
         assert tir.shape == (COLOR_SIZE, COLOR_SIZE), f"Bad TIR shape {tir.shape}"
         assert rgb.shape == (3, COLOR_SIZE, COLOR_SIZE), f"Bad RGB shape {rgb.shape}"
@@ -93,3 +98,7 @@ class ColorizationDataset(Dataset):
         rgb_t = torch.from_numpy(rgb)
 
         return tir_t, rgb_t, fname
+
+
+class LandsatColorDataset(ColorizationDataset):
+    """Notebook-compatible class name for colorization patches."""

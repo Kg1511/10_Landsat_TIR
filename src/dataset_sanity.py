@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 import numpy as np
 
 from src.config import COLOR_SIZE, DATASET_ROOT, OUTPUT_DIR, SR_HR_SIZE, SR_LR_SIZE
-from src.preprocessing import compute_preprocess_stats, save_preprocess_stats
+from src.preprocessing import compute_preprocess_stats, ensure_rgb_chw, save_preprocess_stats
 
 
 @dataclass
@@ -25,7 +25,7 @@ def _npy_names(path: str) -> set[str]:
     return {name for name in os.listdir(path) if name.endswith(".npy")}
 
 
-def _summarize_arrays(path: str, expected_shape: tuple[int, ...]) -> tuple[ArraySummary, list[str]]:
+def _summarize_arrays(path: str, expected_shape: tuple[int, ...], rgb: bool = False) -> tuple[ArraySummary, list[str]]:
     names = sorted(_npy_names(path))
     bad = []
     min_value = float("inf")
@@ -34,6 +34,11 @@ def _summarize_arrays(path: str, expected_shape: tuple[int, ...]) -> tuple[Array
 
     for name in names:
         arr = np.load(os.path.join(path, name))
+        if rgb:
+            try:
+                arr = ensure_rgb_chw(arr)
+            except ValueError as exc:
+                bad.append(f"{name}: {exc}")
         if arr.shape != expected_shape:
             bad.append(f"{name}: shape {arr.shape}, expected {expected_shape}")
         finite = np.isfinite(arr)
@@ -91,7 +96,7 @@ def run_sanity_check(dataset_root: str = DATASET_ROOT, write_stats: bool = False
             os.path.join(color_root, split, "tir_100m"), (COLOR_SIZE, COLOR_SIZE)
         )
         rgb_summary, rgb_bad = _summarize_arrays(
-            os.path.join(color_root, split, "rgb_100m"), (3, COLOR_SIZE, COLOR_SIZE)
+            os.path.join(color_root, split, "rgb_100m"), (3, COLOR_SIZE, COLOR_SIZE), rgb=True
         )
 
         split_errors = (
@@ -127,7 +132,7 @@ def run_sanity_check(dataset_root: str = DATASET_ROOT, write_stats: bool = False
 
 def main():
     parser = argparse.ArgumentParser(description="Check dataset pairs, shapes, and preprocessing stats")
-    parser.add_argument("--dataset-root", default=DATASET_ROOT)
+    parser.add_argument("--dataset-root", "--root", dest="dataset_root", default=DATASET_ROOT)
     parser.add_argument("--write-json", default=os.path.join(OUTPUT_DIR, "dataset_sanity_report.json"))
     parser.add_argument("--write-stats", action="store_true", help="Also compute checkpoints/preprocess_stats.json")
     args = parser.parse_args()

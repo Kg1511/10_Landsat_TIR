@@ -1,70 +1,72 @@
 # Landsat-9 TIR Super-Resolution and Colorization
 
-SAC / ISRO Bharatiya Antariksh Hackathon project for raw thermal infrared
-enhancement and colorization.
+Notebook-aligned implementation for raw Landsat-9 thermal infrared
+super-resolution and colorization.
 
-The pipeline uses original `.npy` or GeoTIFF sensor values as model input. Plot
-stretching, colormaps, screenshots, and other visualization outputs are kept out
-of training and inference.
-
-## What This Project Does
-
-1. Super-resolves Landsat-9 TIR 200 m patches to TIR 100 m output.
-2. Colorizes TIR 100 m patches into RGB-like 100 m output.
-3. Saves and reuses `checkpoints/preprocess_stats.json` for reproducible model
-   preprocessing.
-4. Supports RRDB super-resolution, Pix2Pix/U-Net colorization, and TinyViT
-   colorization comparison.
-5. Exports final arrays and challenge-style BGR GeoTIFF outputs.
-
-## Project Layout
+Source of truth:
 
 ```text
-src/
-  config.py                       Central paths and hyperparameters
-  preprocessing.py                Train-set stats and normalization helpers
-  dataset_sanity.py               Dataset pair, shape, and stats checks
-  train_sr.py                     RRDB super-resolution training
-  train_colorization.py           Pix2Pix/U-Net colorization training
-  train_transformer_colorization.py TinyViT colorization training
-  evaluate.py                     SR, U-Net, and TinyViT evaluation
-  infer.py                        End-to-end SR + colorization inference
-  export_models.py                TorchScript / ONNX export
-  data/                           Dataset loaders
-  models/                         RRDB, U-Net, PatchGAN, TinyViT, losses
-docs/
-  ISRO_Landsat9_SR_Colorization_Project_Documentation.md
+notebooks/landsat9_correct_full_model_notebook.ipynb
+docs/codex_landsat9_notebook_alignment_update.md
 ```
 
-## Dataset Format
+## Non-Negotiable Rule
 
-Set `DATASET_ROOT` in `src/config.py`, or place the dataset at:
+The models learn from original Landsat-9 sensor arrays only.
+
+- Raw `.npy` TIR/RGB arrays are used for training and inference.
+- TIR is normalized with train-set mean/std.
+- RGB is normalized with train-set per-band min/max.
+- PNGs, colormaps, matplotlib figures, percentile stretching, and previews are display-only.
+- Display outputs are never fed back into a model.
+
+## Safe Default Pipeline
+
+The safe final model is:
+
+```text
+SimpleSRNet CNN SR + ColorUNet CNN colorization
+```
+
+Pix2Pix GAN and Tiny Transformer are comparison/extension models.
+
+Final inference is always two-stage:
+
+```text
+Raw TIR 200m 256x256
+  -> SimpleSRNet
+  -> predicted TIR 100m 512x512
+  -> split into four 256x256 tiles
+  -> ColorUNet / GAN / Transformer colorizer
+  -> RGB-like 512x512 output
+```
+
+## Dataset Layout
 
 ```text
 dataset_current_repo_format/
-  sr/
-    train/tir_200m/*.npy
-    train/tir_100m/*.npy
-    val/tir_200m/*.npy
-    val/tir_100m/*.npy
-    test/tir_200m/*.npy
-    test/tir_100m/*.npy
-  colorization/
-    train/tir_100m/*.npy
-    train/rgb_100m/*.npy
-    val/tir_100m/*.npy
-    val/rgb_100m/*.npy
-    test/tir_100m/*.npy
-    test/rgb_100m/*.npy
+  sr/train/tir_200m/*.npy
+  sr/train/tir_100m/*.npy
+  sr/val/tir_200m/*.npy
+  sr/val/tir_100m/*.npy
+  sr/test/tir_200m/*.npy
+  sr/test/tir_100m/*.npy
+
+  colorization/train/tir_100m/*.npy
+  colorization/train/rgb_100m/*.npy
+  colorization/val/tir_100m/*.npy
+  colorization/val/rgb_100m/*.npy
+  colorization/test/tir_100m/*.npy
+  colorization/test/rgb_100m/*.npy
 ```
 
-Expected shapes:
+Supported shapes:
 
 ```text
-SR input:       (256, 256)
-SR target:      (512, 512)
-Color input:    (256, 256)
-Color target:   (3, 256, 256)
+SR input:      (256, 256) -> tensor (1, 256, 256)
+SR target:     (512, 512) -> tensor (1, 512, 512)
+Color input:   (256, 256) -> tensor (1, 256, 256)
+Color target:  (3, 256, 256) or HWC RGB -> tensor (3, 256, 256)
 ```
 
 ## Setup
@@ -73,78 +75,130 @@ Color target:   (3, 256, 256)
 pip install -r requirements.txt
 ```
 
-## Run Order
+Set `DATASET_ROOT` in `src/config.py`, or pass `--dataset-root` / `--root` where available.
 
-First validate the dataset and create preprocessing stats:
+## Exact Run Order
+
+1. Dataset sanity check and preprocessing stats:
 
 ```bash
-python -m src.dataset_sanity --write-stats
+python -m src.dataset_sanity --root dataset_current_repo_format --write-stats
 ```
 
-This writes:
+2. Train SR CNN baseline:
+
+```bash
+python -m src.train_sr --dataset-root dataset_current_repo_format --epochs 5
+```
+
+3. Train Color CNN U-Net baseline:
+
+```bash
+python -m src.train_colorization --dataset-root dataset_current_repo_format --mode cnn --epochs 5
+```
+
+4. Optional Pix2Pix GAN comparison:
+
+```bash
+python -m src.train_colorization --dataset-root dataset_current_repo_format --mode gan --epochs 2
+```
+
+5. Optional Tiny Transformer comparison:
+
+```bash
+python -m src.train_transformer_colorization --dataset-root dataset_current_repo_format --epochs 2
+```
+
+6. Evaluate/compare checkpoints:
+
+```bash
+python -m src.evaluate --task all --root dataset_current_repo_format
+python -m src.compare_models --dataset-root dataset_current_repo_format
+```
+
+7. Run final two-stage inference on one raw 256x256 TIR `.npy`:
+
+```bash
+python -m src.infer --input sample_001.npy --output output/final_two_stage_outputs --color-model cnn
+```
+
+8. Run batch inference for common/finale dataset:
+
+```bash
+python -m src.infer --input common_dataset --output output/common_outputs --batch --color-model cnn
+```
+
+Batch inference writes `inference_manifest.json`.
+
+## Training Presets
+
+Smoke test:
+
+```python
+SR_EPOCHS = 2
+COLOR_CNN_EPOCHS = 2
+GAN_EPOCHS = 1
+VIT_EPOCHS = 1
+```
+
+Quick run:
+
+```python
+SR_EPOCHS = 5
+COLOR_CNN_EPOCHS = 5
+GAN_EPOCHS = 2
+VIT_EPOCHS = 2
+```
+
+Better/final run:
+
+```python
+SR_EPOCHS = 20
+COLOR_CNN_EPOCHS = 25
+GAN_EPOCHS = 10
+VIT_EPOCHS = 15
+```
+
+## Notebook Checkpoint Names
+
+Saved under `checkpoints/` by default:
 
 ```text
-checkpoints/preprocess_stats.json
-output/dataset_sanity_report.json
+sr_cnn_residual_original_sensor_values.pth
+color_cnn_unet_original_sensor_values.pth
+color_pix2pix_original_sensor_values.pth
+color_tiny_transformer_original_sensor_values.pth
+model_comparison_metrics.json
+preprocess_stats.json
 ```
 
-Train the SR model:
+## Final Output Files
 
-```bash
-python -m src.train_sr --stage 1
-python -m src.train_sr --stage 2
-```
-
-Train colorization models:
-
-```bash
-python -m src.train_colorization
-python -m src.train_transformer_colorization
-```
-
-Evaluate:
-
-```bash
-python -m src.evaluate --task both
-```
-
-Run final inference:
-
-```bash
-python -m src.infer --input path/to/tir_200m.tif --output output
-```
-
-Use TinyViT instead of U-Net colorization:
-
-```bash
-python -m src.infer --input path/to/tir_200m.tif --output output --color_model tiny_vit --color_ckpt color_tiny_transformer_best.pth
-```
-
-Export trained models:
-
-```bash
-python -m src.export_models --task sr --checkpoint sr_stage2_best.pth
-python -m src.export_models --task color --checkpoint color_best.pth
-python -m src.export_models --task vit --checkpoint color_tiny_transformer_best.pth
-```
-
-## Outputs
-
-Inference writes:
+Single or batch inference saves:
 
 ```text
-output/model_outputs/tir_superresolved_100m/<product_id>.tif
-output/model_outputs/colorized_tir_100m/<product_id>.tif
-output/model_outputs/arrays/<product_id>_pred_tir100m.npy
-output/model_outputs/arrays/<product_id>_pred_rgb_chw.npy
+*_pred_tir100m_512.npy
+*_pred_rgb_chw_original_scale.npy
+*_pred_bgr_chw.tif
+*_preview.png
 ```
 
-The colorized GeoTIFF is saved in BGR band order for the challenge output
-format. The `.npy` RGB array remains channel-first RGB.
+The preview PNG is stretched for human display only. The BGR TIFF is produced
+for final project convention compatibility.
 
-## Raw Sensor Value Rule
+## Notebook-Aligned Names
 
-Training and inference use original arrays only. Visualization helpers can make
-human-readable figures, but those figures are never passed back into the model.
-The saved preprocessing stats define the numeric transform used across training,
-evaluation, and final inference.
+The repo exposes the notebook names in `src.notebook_pipeline` and model modules:
+
+```text
+LandsatSRDataset, LandsatColorDataset
+ResidualBlock, SimpleSRNet
+ConvBlock, ColorUNet
+PatchDiscriminator
+TinyViTColorNet
+predict_sr_from_raw_array
+colorize_512_tir_by_tiles
+save_final_outputs
+load_best_color_model
+run_batch_inference_on_folder
+```

@@ -35,8 +35,8 @@ class PreprocessStats:
     tir_std: float = 20.0
     tir_min: float = 250.0
     tir_max: float = 350.0
-    rgb_min: float = 0.0
-    rgb_max: float = 1.0
+    rgb_min: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    rgb_max: list[float] = field(default_factory=lambda: [1.0, 1.0, 1.0])
     tir_count: int = 0
     rgb_count: int = 0
     dataset_root: str = ""
@@ -49,8 +49,16 @@ class PreprocessStats:
         return max(float(self.tir_max) - float(self.tir_min), EPS)
 
     @property
-    def rgb_range(self) -> float:
-        return max(float(self.rgb_max) - float(self.rgb_min), EPS)
+    def rgb_min_array(self) -> np.ndarray:
+        return np.asarray(self.rgb_min, dtype=np.float32).reshape(3, 1, 1)
+
+    @property
+    def rgb_max_array(self) -> np.ndarray:
+        return np.asarray(self.rgb_max, dtype=np.float32).reshape(3, 1, 1)
+
+    @property
+    def rgb_range(self) -> np.ndarray:
+        return np.maximum(self.rgb_max_array - self.rgb_min_array, EPS)
 
     def normalize_tir_array(self, arr: np.ndarray) -> np.ndarray:
         """Kelvin array to z-score model input."""
@@ -78,15 +86,23 @@ class PreprocessStats:
 
     def normalize_rgb_array(self, arr: np.ndarray) -> np.ndarray:
         """RGB/reference array to [0, 1] using train-set range."""
-        arr = (arr.astype(np.float32) - self.rgb_min) / self.rgb_range
+        arr = ensure_rgb_chw(arr)
+        arr = (arr.astype(np.float32) - self.rgb_min_array) / self.rgb_range
         return np.clip(arr, 0.0, 1.0).astype(np.float32)
 
     def denormalize_rgb_array(self, arr: np.ndarray) -> np.ndarray:
         """RGB [0, 1] array back to original reference scale."""
-        return (arr.astype(np.float32) * self.rgb_range + self.rgb_min).astype(np.float32)
+        return (arr.astype(np.float32) * self.rgb_range + self.rgb_min_array).astype(np.float32)
 
     def denormalize_rgb_tensor(self, tensor: "torch.Tensor") -> "torch.Tensor":
-        return tensor * self.rgb_range + self.rgb_min
+        import torch
+
+        mn = torch.as_tensor(self.rgb_min_array, dtype=tensor.dtype, device=tensor.device)
+        mx = torch.as_tensor(self.rgb_max_array, dtype=tensor.dtype, device=tensor.device)
+        if tensor.ndim == 4:
+            mn = mn.unsqueeze(0)
+            mx = mx.unsqueeze(0)
+        return tensor * (mx - mn + EPS) + mn
 
     def to_dict(self) -> dict:
         data = asdict(self)
@@ -101,10 +117,36 @@ class PreprocessStats:
     def from_dict(cls, data: dict) -> "PreprocessStats":
         fields = {name for name in cls.__dataclass_fields__}
         values = {key: value for key, value in data.items() if key in fields}
+        for key in ["rgb_min", "rgb_max"]:
+            if key in values and isinstance(values[key], (int, float)):
+                values[key] = [float(values[key])] * 3
+            elif key in values:
+                values[key] = [float(v) for v in values[key]]
+        for key in ["tir_mean", "tir_std", "tir_min", "tir_max"]:
+            if key in values:
+                values[key] = float(values[key])
         return cls(**values)
 
 
 DEFAULT_STATS = PreprocessStats()
+
+
+def safe_load_npy(path: str) -> np.ndarray:
+    """Load original .npy values and replace non-finite values safely."""
+    arr = np.load(path).astype(np.float32)
+    if not np.isfinite(arr).all():
+        arr = np.nan_to_num(arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return arr
+
+
+def ensure_rgb_chw(arr: np.ndarray) -> np.ndarray:
+    """Return RGB as CHW, accepting either CHW or HWC input."""
+    arr = arr.astype(np.float32)
+    if arr.ndim == 3 and arr.shape[0] == 3:
+        return arr
+    if arr.ndim == 3 and arr.shape[-1] == 3:
+        return np.moveaxis(arr, -1, 0)
+    raise ValueError(f"Expected RGB as (3,H,W) or (H,W,3), got {arr.shape}")
 
 
 def _npy_files(path: str) -> list[str]:
@@ -123,7 +165,7 @@ def _stream_numeric_stats(paths: list[str]) -> dict:
     max_val = float("-inf")
 
     for path in paths:
-        arr = np.load(path).astype(np.float64, copy=False)
+        arr = safe_load_npy(path).astype(np.float64, copy=False)
         values = arr[np.isfinite(arr)]
         if values.size == 0:
             continue
@@ -144,6 +186,32 @@ def _stream_numeric_stats(paths: list[str]) -> dict:
         "std": float(np.sqrt(variance)),
         "min": min_val,
         "max": max_val,
+    }
+
+
+def _stream_rgb_band_stats(paths: list[str]) -> dict:
+    band_min = np.array([np.inf, np.inf, np.inf], dtype=np.float64)
+    band_max = np.array([-np.inf, -np.inf, -np.inf], dtype=np.float64)
+    count = 0
+
+    for path in paths:
+        chw = ensure_rgb_chw(safe_load_npy(path)).astype(np.float64, copy=False)
+        for channel in range(3):
+            band = chw[channel]
+            values = band[np.isfinite(band)]
+            if values.size == 0:
+                continue
+            band_min[channel] = min(band_min[channel], float(values.min()))
+            band_max[channel] = max(band_max[channel], float(values.max()))
+            count += int(values.size)
+
+    if count == 0 or not np.isfinite(band_min).all() or not np.isfinite(band_max).all():
+        raise ValueError("No finite RGB values found while computing preprocessing stats.")
+
+    return {
+        "count": count,
+        "min": band_min.astype(float).tolist(),
+        "max": band_max.astype(float).tolist(),
     }
 
 
@@ -170,7 +238,7 @@ def compute_preprocess_stats(dataset_root: str = DATASET_ROOT, split: str = "tra
         raise FileNotFoundError(f"No RGB .npy files found under {dataset_root!r} for split {split!r}.")
 
     tir = _stream_numeric_stats(tir_files)
-    rgb = _stream_numeric_stats(rgb_files)
+    rgb = _stream_rgb_band_stats(rgb_files)
 
     return PreprocessStats(
         tir_mean=tir["mean"],
@@ -189,6 +257,20 @@ def compute_preprocess_stats(dataset_root: str = DATASET_ROOT, split: str = "tra
             "rgb": len(rgb_files),
         },
     )
+
+
+def compute_tir_mean_std_from_train(root: str = DATASET_ROOT) -> tuple[float, float]:
+    """Notebook-compatible TIR mean/std computation from training arrays only."""
+    tir_files, _ = collect_training_files(root, "train")
+    tir = _stream_numeric_stats(tir_files)
+    return float(tir["mean"]), float(tir["std"])
+
+
+def compute_rgb_min_max_from_train(root: str = DATASET_ROOT) -> tuple[list[float], list[float]]:
+    """Notebook-compatible per-band RGB min/max from training RGB arrays only."""
+    _, rgb_files = collect_training_files(root, "train")
+    rgb = _stream_rgb_band_stats(rgb_files)
+    return rgb["min"], rgb["max"]
 
 
 def save_preprocess_stats(stats: PreprocessStats, path: str = PREPROCESS_STATS_PATH) -> str:
@@ -225,7 +307,7 @@ def main() -> None:
     print(f"Saved preprocessing stats: {out_path}")
     print(f"TIR mean/std: {stats.tir_mean:.6f} / {stats.tir_std:.6f}")
     print(f"TIR min/max:  {stats.tir_min:.6f} / {stats.tir_max:.6f}")
-    print(f"RGB min/max:  {stats.rgb_min:.6f} / {stats.rgb_max:.6f}")
+    print(f"RGB min/max:  {stats.rgb_min} / {stats.rgb_max}")
 
 
 if __name__ == "__main__":

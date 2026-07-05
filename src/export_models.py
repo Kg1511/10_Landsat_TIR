@@ -5,31 +5,38 @@ import os
 
 import torch
 
-from src.config import COLOR_SIZE, DEVICE, OUTPUT_DIR, SR_LR_SIZE
-from src.models.rrdb import RRDBNet
+from src.config import (
+    CHECKPOINT_DIR,
+    COLOR_CNN_CHECKPOINT,
+    COLOR_SIZE,
+    COLOR_VIT_CHECKPOINT,
+    DEVICE,
+    OUTPUT_DIR,
+    SR_CNN_CHECKPOINT,
+    SR_LR_SIZE,
+)
+from src.models.simple_sr import SimpleSRNet
 from src.models.tiny_vit import TinyViTColorNet
-from src.models.unet import UNetGenerator
+from src.models.unet import ColorUNet
 from src.utils import load_checkpoint
 
 
 def _load_model(task: str, checkpoint: str):
     if task == "sr":
-        model = RRDBNet().to(DEVICE)
-        state_key = "model"
+        model = SimpleSRNet(channels=64, num_blocks=6).to(DEVICE)
         dummy = torch.randn(1, 1, SR_LR_SIZE, SR_LR_SIZE, device=DEVICE)
     elif task == "color":
-        model = UNetGenerator().to(DEVICE)
-        state_key = "generator"
+        model = ColorUNet(base=32).to(DEVICE)
         dummy = torch.randn(1, 1, COLOR_SIZE, COLOR_SIZE, device=DEVICE)
     elif task == "vit":
-        model = TinyViTColorNet().to(DEVICE)
-        state_key = "model"
+        model = TinyViTColorNet(dim=128, depth=4, heads=4, patch=16).to(DEVICE)
         dummy = torch.randn(1, 1, COLOR_SIZE, COLOR_SIZE, device=DEVICE)
     else:
         raise ValueError(f"Unsupported export task: {task}")
 
     ckpt = load_checkpoint(checkpoint, map_location=DEVICE)
-    model.load_state_dict(ckpt[state_key])
+    state = ckpt.get("model_state_dict", ckpt.get("model", ckpt))
+    model.load_state_dict(state)
     model.eval()
     return model, dummy
 
@@ -64,18 +71,24 @@ def export_onnx(task: str, checkpoint: str, output_path: str) -> str:
 def main():
     parser = argparse.ArgumentParser(description="Export SR/colorization models")
     parser.add_argument("--task", choices=["sr", "color", "vit"], required=True)
-    parser.add_argument("--checkpoint", required=True)
+    parser.add_argument("--checkpoint", default=None)
     parser.add_argument("--format", choices=["torchscript", "onnx"], default="torchscript")
     parser.add_argument("--output", default=None)
     args = parser.parse_args()
 
     suffix = "pt" if args.format == "torchscript" else "onnx"
+    defaults = {
+        "sr": SR_CNN_CHECKPOINT,
+        "color": COLOR_CNN_CHECKPOINT,
+        "vit": COLOR_VIT_CHECKPOINT,
+    }
+    checkpoint = args.checkpoint or os.path.join(CHECKPOINT_DIR, defaults[args.task])
     output = args.output or os.path.join(OUTPUT_DIR, "exports", f"{args.task}.{suffix}")
 
     if args.format == "torchscript":
-        path = export_torchscript(args.task, args.checkpoint, output)
+        path = export_torchscript(args.task, checkpoint, output)
     else:
-        path = export_onnx(args.task, args.checkpoint, output)
+        path = export_onnx(args.task, checkpoint, output)
     print(f"Exported {args.task} model: {path}")
 
 

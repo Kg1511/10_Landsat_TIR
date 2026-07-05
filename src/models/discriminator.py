@@ -14,6 +14,7 @@ References
   Networks", CVPR 2017.
 """
 
+import torch
 import torch.nn as nn
 from torch.nn.utils import spectral_norm
 
@@ -82,3 +83,32 @@ class PatchGANDiscriminator(nn.Module):
         out : [B, 1, H', W']   patch-level real/fake scores
         """
         return self.model(x)
+
+
+class PatchDiscriminator(nn.Module):
+    """Notebook Pix2Pix discriminator.
+
+    The forward method accepts TIR and RGB separately, then concatenates them
+    into the 4-channel conditional discriminator input.
+    """
+
+    def __init__(self, in_channels=4, base=64):
+        super().__init__()
+
+        def block(in_ch, out_ch, stride=2, use_bn=True):
+            layers = [nn.Conv2d(in_ch, out_ch, 4, stride=stride, padding=1)]
+            if use_bn:
+                layers.append(nn.BatchNorm2d(out_ch))
+            layers.append(nn.LeakyReLU(0.2, inplace=True))
+            return layers
+
+        layers = []
+        layers += block(in_channels, base, stride=2, use_bn=False)
+        layers += block(base, base * 2, stride=2)
+        layers += block(base * 2, base * 4, stride=2)
+        layers += block(base * 4, base * 8, stride=1)
+        layers += [nn.Conv2d(base * 8, 1, 4, stride=1, padding=1)]
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, tir, rgb):
+        return self.net(torch.cat([tir, rgb], dim=1))

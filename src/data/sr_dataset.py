@@ -15,7 +15,7 @@ import torch
 from torch.utils.data import Dataset
 
 from src.config import DATASET_ROOT, PREPROCESS_STATS_PATH, SR_HR_SIZE, SR_LR_SIZE
-from src.preprocessing import PreprocessStats, load_preprocess_stats
+from src.preprocessing import PreprocessStats, load_preprocess_stats, safe_load_npy
 
 
 class SRDataset(Dataset):
@@ -70,8 +70,8 @@ class SRDataset(Dataset):
     def __getitem__(self, idx):
         fname = self.files[idx]
 
-        lr = np.load(os.path.join(self.lr_dir, fname)).astype(np.float32)
-        hr = np.load(os.path.join(self.hr_dir, fname)).astype(np.float32)
+        lr = safe_load_npy(os.path.join(self.lr_dir, fname))
+        hr = safe_load_npy(os.path.join(self.hr_dir, fname))
 
         assert lr.shape == (SR_LR_SIZE, SR_LR_SIZE), f"Bad LR shape {lr.shape}"
         assert hr.shape == (SR_HR_SIZE, SR_HR_SIZE), f"Bad HR shape {hr.shape}"
@@ -86,3 +86,7 @@ class SRDataset(Dataset):
         hr_t = torch.from_numpy(hr).unsqueeze(0)
 
         return lr_t, hr_t, fname
+
+
+class LandsatSRDataset(SRDataset):
+    """Notebook-compatible class name for SR patches."""
