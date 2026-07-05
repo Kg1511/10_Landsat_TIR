@@ -1,18 +1,9 @@
 """
-End-to-end inference pipeline.
+End-to-end inference for TIR super-resolution and colorization.
 
-Full flow
----------
-Input TIR scene @200m  →  tile  →  SR model  →  stitch  →  TIR @100m
-                                                         →  tile  →  Colorization model  →  stitch  →  RGB @100m
-
-Outputs are saved as GeoTIFF with original CRS and geotransform.
-Colorized TIFF uses BGR band order per the challenge spec.
-
-Usage
------
-    python -m src.infer --input scene_B10.tif --output output/
-    python -m src.infer --input scene_B10.tif --sr_ckpt sr_stage2_best.pth --color_ckpt color_best.pth
+The pipeline loads original TIR sensor values, applies saved preprocessing
+statistics, runs SR and colorization models, and writes arrays plus GeoTIFFs.
+Visualization transforms are not used as model input.
 """
 
 import argparse
@@ -20,269 +11,226 @@ import os
 import time
 
 import numpy as np
-import torch
 import rasterio
-from rasterio.transform import from_bounds
+import torch
+from rasterio.transform import Affine, from_origin
 
-from src.config import (
-    DEVICE,
-    CHECKPOINT_DIR,
-    SR_OUTPUT_DIR,
-    COLOR_OUTPUT_DIR,
-    TIR_MIN,
-    TIR_RANGE,
-    SR_LR_SIZE,
-    SR_HR_SIZE,
-    COLOR_SIZE,
-    UNET_USE_TANH,
-)
+from src.config import DEVICE, PREPROCESS_STATS_PATH, UNET_USE_TANH
 from src.models.rrdb import RRDBNet
 from src.models.unet import UNetGenerator
-from src.utils import load_checkpoint, setup_logger, denormalize_tir, denormalize_rgb
+from src.preprocessing import load_preprocess_stats
+from src.utils import load_checkpoint, setup_logger
 
 
 logger = setup_logger("Inference")
 
 
-# ────────────────────────────────────────────────────────
-#  Normalisation / Denormalisation
-# ────────────────────────────────────────────────────────
-
-def normalize_tir_np(arr):
-    """Kelvin → [0, 1]."""
-    return np.clip((arr - TIR_MIN) / TIR_RANGE, 0.0, 1.0).astype(np.float32)
-
-
-def denormalize_tir_np(arr):
-    """[0, 1] → Kelvin."""
-    return arr * TIR_RANGE + TIR_MIN
-
-
-def denormalize_rgb_np(arr):
-    """[-1, 1] → [0, 1] if Tanh, else identity."""
-    if UNET_USE_TANH:
-        return (arr + 1.0) / 2.0
-    return arr
-
-
-# ────────────────────────────────────────────────────────
-#  Gaussian blending weights for overlap removal
-# ────────────────────────────────────────────────────────
-
 def _gaussian_weights(tile_size: int, sigma_frac: float = 0.3):
-    """Create 2-D Gaussian window for tile blending."""
+    """Create a 2D Gaussian window for tile blending."""
     ax = np.arange(tile_size, dtype=np.float32) - tile_size / 2.0
     xx, yy = np.meshgrid(ax, ax)
     sigma = tile_size * sigma_frac
-    g = np.exp(-(xx ** 2 + yy ** 2) / (2 * sigma ** 2))
-    return g
+    return np.exp(-(xx**2 + yy**2) / (2 * sigma**2))
 
 
-# ────────────────────────────────────────────────────────
-#  Tiled prediction helpers
-# ────────────────────────────────────────────────────────
+def _start_positions(length: int, tile_size: int, stride: int) -> list[int]:
+    if length <= tile_size:
+        return [0]
+    positions = list(range(0, length - tile_size + 1, stride))
+    last = length - tile_size
+    if positions[-1] != last:
+        positions.append(last)
+    return positions
 
-def tile_predict_sr(model, tir_full, tile_size=256, overlap=16, device=DEVICE):
-    """Run SR model on overlapping tiles and stitch with Gaussian blending.
 
-    Parameters
-    ----------
-    tir_full : ndarray (H, W) normalised [0, 1]  in LR space
-    Returns
-    -------
-    sr_full  : ndarray (2*H, 2*W) normalised [0, 1]
-    """
-    H, W = tir_full.shape
-    out_H, out_W = H * 2, W * 2
-    result = np.zeros((out_H, out_W), dtype=np.float64)
-    weight = np.zeros((out_H, out_W), dtype=np.float64)
+def _pad_to_tile(arr: np.ndarray, tile_size: int) -> tuple[np.ndarray, int, int]:
+    h, w = arr.shape
+    pad_h = max(tile_size - h, 0)
+    pad_w = max(tile_size - w, 0)
+    if pad_h == 0 and pad_w == 0:
+        return arr, h, w
+    return np.pad(arr, ((0, pad_h), (0, pad_w)), mode="edge"), h, w
 
-    g_lr = _gaussian_weights(tile_size)
+
+def _load_tir_input(input_path: str):
+    """Load a single-band TIR input from GeoTIFF or .npy."""
+    ext = os.path.splitext(input_path)[1].lower()
+    if ext == ".npy":
+        arr = np.load(input_path).astype(np.float32)
+        if arr.ndim != 2:
+            raise ValueError(f"Expected a 2D .npy TIR array, got shape {arr.shape}")
+        profile = {
+            "driver": "GTiff",
+            "height": arr.shape[0],
+            "width": arr.shape[1],
+            "count": 1,
+            "dtype": "float32",
+            "transform": from_origin(0, 0, 1, 1),
+        }
+        return arr, profile
+
+    with rasterio.open(input_path) as src:
+        arr = src.read(1).astype(np.float32)
+        return arr, src.profile.copy()
+
+
+def _sr_profile_from_input(profile: dict, height: int, width: int) -> dict:
+    sr_profile = profile.copy()
+    sr_profile.update(height=height, width=width, count=1, dtype="float32")
+
+    transform = sr_profile.get("transform")
+    if isinstance(transform, Affine):
+        sr_profile["transform"] = Affine(
+            transform.a / 2,
+            transform.b,
+            transform.c,
+            transform.d,
+            transform.e / 2,
+            transform.f,
+        )
+    return sr_profile
+
+
+def tile_predict_sr(model, tir_full, tile_size=256, overlap=32, device=DEVICE):
+    """Run SR on overlapping normalized TIR tiles and blend the result."""
+    tir_work, original_h, original_w = _pad_to_tile(tir_full, tile_size)
+    h, w = tir_work.shape
+    out_h, out_w = h * 2, w * 2
+    result = np.zeros((out_h, out_w), dtype=np.float64)
+    weight = np.zeros((out_h, out_w), dtype=np.float64)
+
     g_hr = _gaussian_weights(tile_size * 2)
-
     stride = tile_size - overlap
     model.eval()
 
     with torch.no_grad():
-        for r in range(0, H, stride):
-            for c in range(0, W, stride):
-                r_end = min(r + tile_size, H)
-                c_end = min(c + tile_size, W)
-                r_start = r_end - tile_size
-                c_start = c_end - tile_size
+        for r in _start_positions(h, tile_size, stride):
+            for c in _start_positions(w, tile_size, stride):
+                patch = tir_work[r : r + tile_size, c : c + tile_size]
+                t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(device)
+                sr = model(t).cpu().numpy()[0, 0]
 
-                patch = tir_full[r_start:r_end, c_start:c_end]
-                t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(device)  # [1,1,256,256]
-                sr = model(t).clamp(0, 1).cpu().numpy()[0, 0]  # [512, 512]
+                out_r = r * 2
+                out_c = c * 2
+                result[out_r : out_r + tile_size * 2, out_c : out_c + tile_size * 2] += sr * g_hr
+                weight[out_r : out_r + tile_size * 2, out_c : out_c + tile_size * 2] += g_hr
 
-                # Output coordinates
-                or_s = r_start * 2
-                oc_s = c_start * 2
-                or_e = or_s + tile_size * 2
-                oc_e = oc_s + tile_size * 2
-
-                result[or_s:or_e, oc_s:oc_e] += sr * g_hr
-                weight[or_s:or_e, oc_s:oc_e] += g_hr
-
-    weight = np.maximum(weight, 1e-8)
-    return (result / weight).astype(np.float32)
+    sr_full = (result / np.maximum(weight, 1e-8)).astype(np.float32)
+    return sr_full[: original_h * 2, : original_w * 2]
 
 
-def tile_predict_color(model, tir_full, tile_size=256, overlap=16, device=DEVICE):
-    """Run colorization model on overlapping tiles.
-
-    Parameters
-    ----------
-    tir_full : ndarray (H, W) normalised [0, 1]
-    Returns
-    -------
-    rgb_full : ndarray (3, H, W)  in [0, 1]
-    """
-    H, W = tir_full.shape
-    result = np.zeros((3, H, W), dtype=np.float64)
-    weight = np.zeros((H, W), dtype=np.float64)
+def tile_predict_color(model, tir_full, tile_size=256, overlap=32, device=DEVICE):
+    """Run colorization on overlapping normalized TIR tiles and blend RGB [0, 1]."""
+    tir_work, original_h, original_w = _pad_to_tile(tir_full, tile_size)
+    h, w = tir_work.shape
+    result = np.zeros((3, h, w), dtype=np.float64)
+    weight = np.zeros((h, w), dtype=np.float64)
 
     g = _gaussian_weights(tile_size)
     stride = tile_size - overlap
     model.eval()
 
     with torch.no_grad():
-        for r in range(0, H, stride):
-            for c in range(0, W, stride):
-                r_end = min(r + tile_size, H)
-                c_end = min(c + tile_size, W)
-                r_start = r_end - tile_size
-                c_start = c_end - tile_size
-
-                patch = tir_full[r_start:r_end, c_start:c_end]
+        for r in _start_positions(h, tile_size, stride):
+            for c in _start_positions(w, tile_size, stride):
+                patch = tir_work[r : r + tile_size, c : c + tile_size]
                 t = torch.from_numpy(patch).unsqueeze(0).unsqueeze(0).to(device)
-                rgb = model(t).cpu().numpy()[0]  # [3, 256, 256]
+                rgb = model(t).cpu().numpy()[0]
+                if UNET_USE_TANH:
+                    rgb = (rgb + 1.0) / 2.0
+                rgb = np.clip(rgb, 0.0, 1.0)
 
-                # Denormalise from [-1,1] to [0,1] if Tanh
-                rgb = denormalize_rgb_np(rgb)
-                rgb = np.clip(rgb, 0, 1)
+                result[:, r : r + tile_size, c : c + tile_size] += rgb * g[np.newaxis]
+                weight[r : r + tile_size, c : c + tile_size] += g
 
-                result[:, r_start:r_end, c_start:c_end] += rgb * g[np.newaxis]
-                weight[r_start:r_end, c_start:c_end] += g
+    rgb_full = (result / np.maximum(weight[np.newaxis], 1e-8)).astype(np.float32)
+    return rgb_full[:, :original_h, :original_w]
 
-    weight = np.maximum(weight, 1e-8)
-    return (result / weight[np.newaxis]).astype(np.float32)
-
-
-# ────────────────────────────────────────────────────────
-#  Main inference pipeline
-# ────────────────────────────────────────────────────────
 
 def run_inference(
     input_path: str,
     output_dir: str,
     sr_ckpt: str = "sr_stage2_best.pth",
     color_ckpt: str = "color_best.pth",
+    stats_path: str = PREPROCESS_STATS_PATH,
 ):
-    """Full inference: TIR → SR → Colorization → GeoTIFF output."""
-
+    """Full inference: TIR input -> SR TIR Kelvin -> colorized RGB/BGR outputs."""
     product_id = os.path.splitext(os.path.basename(input_path))[0]
     logger.info(f"Input: {input_path}")
     logger.info(f"Product ID: {product_id}")
 
-    # ── Load input scene ──────────────────────────
-    with rasterio.open(input_path) as src:
-        tir_raw = src.read(1).astype(np.float32)  # single-band TIR
-        profile = src.profile.copy()
-        crs = src.crs
-        transform = src.transform
-        logger.info(f"Input shape: {tir_raw.shape}, CRS: {crs}")
+    if not os.path.isfile(stats_path):
+        logger.warning(f"Preprocessing stats not found at {stats_path}; using documented defaults.")
+    stats = load_preprocess_stats(stats_path)
 
-    # Normalise
-    tir_norm = normalize_tir_np(tir_raw)
+    tir_raw, profile = _load_tir_input(input_path)
+    logger.info(f"Input shape: {tir_raw.shape}")
 
-    # ── SR Model ──────────────────────────────────
+    tir_norm = stats.normalize_tir_array(tir_raw)
+
     logger.info("Loading SR model...")
     sr_model = RRDBNet().to(DEVICE)
     sr_ckpt_data = load_checkpoint(sr_ckpt, map_location=DEVICE)
     sr_model.load_state_dict(sr_ckpt_data["model"])
-    sr_model.eval()
 
     logger.info("Running super-resolution...")
     t0 = time.time()
     sr_norm = tile_predict_sr(sr_model, tir_norm, tile_size=256, overlap=32)
-    logger.info(f"  SR done in {time.time() - t0:.1f}s  |  Output shape: {sr_norm.shape}")
+    sr_kelvin = stats.denormalize_tir_array(sr_norm)
+    logger.info(f"SR done in {time.time() - t0:.1f}s; output shape: {sr_kelvin.shape}")
 
-    # Denormalise to Kelvin
-    sr_kelvin = denormalize_tir_np(sr_norm)
-
-    # Save SR GeoTIFF
-    sr_out_dir = os.path.join(output_dir, "model_outputs", "tir_superresolved_100m")
+    model_root = os.path.join(output_dir, "model_outputs")
+    sr_out_dir = os.path.join(model_root, "tir_superresolved_100m")
+    color_out_dir = os.path.join(model_root, "colorized_tir_100m")
+    array_out_dir = os.path.join(model_root, "arrays")
     os.makedirs(sr_out_dir, exist_ok=True)
+    os.makedirs(color_out_dir, exist_ok=True)
+    os.makedirs(array_out_dir, exist_ok=True)
+
+    np.save(os.path.join(array_out_dir, f"{product_id}_pred_tir100m.npy"), sr_kelvin)
+
     sr_path = os.path.join(sr_out_dir, f"{product_id}.tif")
-
-    sr_profile = profile.copy()
-    sr_profile.update(
-        height=sr_kelvin.shape[0],
-        width=sr_kelvin.shape[1],
-        count=1,
-        dtype="float32",
-    )
-    # Update transform for 2× resolution
-    if transform is not None:
-        sr_profile["transform"] = rasterio.Affine(
-            transform.a / 2, transform.b, transform.c,
-            transform.d, transform.e / 2, transform.f,
-        )
-
+    sr_profile = _sr_profile_from_input(profile, sr_kelvin.shape[0], sr_kelvin.shape[1])
     with rasterio.open(sr_path, "w", **sr_profile) as dst:
-        dst.write(sr_kelvin, 1)
-    logger.info(f"  Saved SR TIR: {sr_path}")
+        dst.write(sr_kelvin.astype(np.float32), 1)
+    logger.info(f"Saved SR TIR: {sr_path}")
 
-    # ── Colorization Model ────────────────────────
     logger.info("Loading colorization model...")
     color_model = UNetGenerator().to(DEVICE)
     color_ckpt_data = load_checkpoint(color_ckpt, map_location=DEVICE)
     color_model.load_state_dict(color_ckpt_data["generator"])
-    color_model.eval()
 
     logger.info("Running colorization...")
     t0 = time.time()
     rgb_01 = tile_predict_color(color_model, sr_norm, tile_size=256, overlap=32)
-    logger.info(f"  Colorization done in {time.time() - t0:.1f}s  |  Output shape: {rgb_01.shape}")
+    rgb_original = stats.denormalize_rgb_array(rgb_01)
+    logger.info(f"Colorization done in {time.time() - t0:.1f}s; output shape: {rgb_original.shape}")
 
-    # Convert RGB → BGR for challenge output format
-    bgr = rgb_01[[2, 1, 0], :, :]
+    np.save(os.path.join(array_out_dir, f"{product_id}_pred_rgb_chw.npy"), rgb_original)
 
-    # Save colorized GeoTIFF
-    color_out_dir = os.path.join(output_dir, "model_outputs", "colorized_tir_100m")
-    os.makedirs(color_out_dir, exist_ok=True)
+    bgr = rgb_original[[2, 1, 0], :, :]
     color_path = os.path.join(color_out_dir, f"{product_id}.tif")
-
     color_profile = sr_profile.copy()
     color_profile.update(count=3, dtype="float32")
-
     with rasterio.open(color_path, "w", **color_profile) as dst:
         for band_idx in range(3):
-            dst.write(bgr[band_idx], band_idx + 1)
-    logger.info(f"  Saved Colorized: {color_path}")
+            dst.write(bgr[band_idx].astype(np.float32), band_idx + 1)
+    logger.info(f"Saved colorized BGR: {color_path}")
 
-    logger.info("Inference complete!")
+    logger.info("Inference complete.")
     return sr_path, color_path
 
 
-# ────────────────────────────────────────────────────────
-#  CLI
-# ────────────────────────────────────────────────────────
-
 def main():
-    parser = argparse.ArgumentParser(description="TIR SR + Colorization Inference")
-    parser.add_argument("--input", type=str, required=True,
-                        help="Path to input TIR GeoTIFF scene")
-    parser.add_argument("--output", type=str, default="output",
-                        help="Output directory")
-    parser.add_argument("--sr_ckpt", type=str, default="sr_stage2_best.pth",
-                        help="SR model checkpoint filename")
-    parser.add_argument("--color_ckpt", type=str, default="color_best.pth",
-                        help="Colorization model checkpoint filename")
+    parser = argparse.ArgumentParser(description="TIR SR + colorization inference")
+    parser.add_argument("--input", type=str, required=True, help="Input TIR GeoTIFF or 2D .npy array")
+    parser.add_argument("--output", type=str, default="output", help="Output directory")
+    parser.add_argument("--sr_ckpt", type=str, default="sr_stage2_best.pth", help="SR checkpoint filename")
+    parser.add_argument("--color_ckpt", type=str, default="color_best.pth", help="Colorization checkpoint filename")
+    parser.add_argument("--stats", type=str, default=PREPROCESS_STATS_PATH, help="preprocess_stats.json path")
     args = parser.parse_args()
 
-    run_inference(args.input, args.output, args.sr_ckpt, args.color_ckpt)
+    run_inference(args.input, args.output, args.sr_ckpt, args.color_ckpt, args.stats)
 
 
 if __name__ == "__main__":

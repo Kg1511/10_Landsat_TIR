@@ -67,21 +67,23 @@ def validate(model, val_loader, device, epoch, save_dir=None):
     model.eval()
     psnr_meter = AverageMeter()
     ssim_meter = AverageMeter()
+    stats = getattr(val_loader.dataset, "stats", None)
 
     for i, (lr, hr, names) in enumerate(val_loader):
         lr = lr.to(device)
         hr = hr.to(device)
 
         sr = model(lr)
-        sr = torch.clamp(sr, 0, 1)
 
         # Per-sample metrics
-        sr_np = tensor_to_numpy(sr)
-        hr_np = tensor_to_numpy(hr)
+        sr_kelvin = stats.denormalize_tir_tensor(sr)
+        hr_kelvin = stats.denormalize_tir_tensor(hr)
+        sr_np = tensor_to_numpy(sr_kelvin)
+        hr_np = tensor_to_numpy(hr_kelvin)
 
         for j in range(sr_np.shape[0]):
-            p = psnr(hr_np[j, 0], sr_np[j, 0], data_range=1.0)
-            s = ssim(hr_np[j, 0], sr_np[j, 0], data_range=1.0)
+            p = psnr(hr_np[j, 0], sr_np[j, 0], data_range=stats.tir_range)
+            s = ssim(hr_np[j, 0], sr_np[j, 0], data_range=stats.tir_range)
             psnr_meter.update(p)
             ssim_meter.update(s)
 
@@ -89,8 +91,11 @@ def validate(model, val_loader, device, epoch, save_dir=None):
         if i == 0 and save_dir is not None:
             os.makedirs(save_dir, exist_ok=True)
             lr_np = tensor_to_numpy(lr)
+            lr_display = stats.tir_to_display_array(lr_np[0, 0])
+            sr_display = stats.tir_to_display_array(tensor_to_numpy(sr)[0, 0])
+            hr_display = stats.tir_to_display_array(tensor_to_numpy(hr)[0, 0])
             create_sr_comparison(
-                lr_np[0, 0], sr_np[0, 0], hr_np[0, 0],
+                lr_display, sr_display, hr_display,
                 save_path=os.path.join(save_dir, f"sr_val_epoch{epoch:03d}.png"),
                 title=f"Epoch {epoch} — PSNR {psnr_meter.avg:.2f} dB",
             )
@@ -111,6 +116,7 @@ def train_stage1(args):
     # Data
     train_ds = SRDataset(DATASET_ROOT, "train", augment=True)
     val_ds = SRDataset(DATASET_ROOT, "val", augment=False)
+    stats = train_ds.stats
     train_loader = DataLoader(
         train_ds, batch_size=SR_BATCH_SIZE, shuffle=True,
         num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY, drop_last=True,
@@ -198,6 +204,7 @@ def train_stage1(args):
             "model": model.state_dict(),
             "optimizer": optimizer.state_dict(),
             "best_psnr": best_psnr,
+            "preprocess_stats": train_ds.stats.to_dict(),
         }
         save_checkpoint(state, "sr_stage1_latest.pth")
         if is_best:
@@ -291,10 +298,12 @@ def train_stage2(args):
             with autocast(enabled=USE_AMP):
                 sr = generator(lr)
                 fake_pair = torch.cat([lr_up, sr], dim=1)
+                sr_display = stats.tir_to_display_tensor(sr)
+                hr_display = stats.tir_to_display_tensor(hr)
 
                 loss_G = (
                     w["l1"] * l1_loss(sr, hr) +
-                    w["perceptual"] * percep_loss(sr, hr) +
+                    w["perceptual"] * percep_loss(sr_display, hr_display) +
                     w["adversarial"] * gan_loss(discriminator(fake_pair), True) +
                     w["physics"] * physics_loss(sr, lr)
                 )
@@ -328,6 +337,7 @@ def train_stage2(args):
             "optimizer_G": opt_G.state_dict(),
             "optimizer_D": opt_D.state_dict(),
             "best_psnr": best_psnr,
+            "preprocess_stats": stats.to_dict(),
         }
         save_checkpoint(state, "sr_stage2_latest.pth")
         if is_best:

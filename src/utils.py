@@ -1,36 +1,32 @@
-"""
-Shared utilities for training, checkpointing, logging, and visualisation.
-"""
+"""Shared utilities for training, checkpointing, logging, and visualization."""
 
-import os
-import logging
 import datetime
+import logging
+import os
 
+import matplotlib.pyplot as plt
 import numpy as np
 import torch
-import matplotlib.pyplot as plt
 
-from src.config import TIR_MIN, TIR_RANGE, CHECKPOINT_DIR, UNET_USE_TANH
+from src.config import CHECKPOINT_DIR, UNET_USE_TANH
+from src.preprocessing import load_preprocess_stats
 
-
-# ────────────────────────────────────────────────────────
-#  Logging
-# ────────────────────────────────────────────────────────
 
 def setup_logger(name: str, log_dir: str = None):
-    """Create a logger that writes to console and (optionally) file."""
+    """Create a logger that writes to console and optionally a file."""
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
+
     fmt = logging.Formatter(
         "[%(asctime)s %(name)s] %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
     )
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setFormatter(fmt)
-    logger.addHandler(ch)
 
-    # File handler
-    if log_dir is not None:
+    if not any(isinstance(handler, logging.StreamHandler) for handler in logger.handlers):
+        ch = logging.StreamHandler()
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+
+    if log_dir is not None and not any(isinstance(handler, logging.FileHandler) for handler in logger.handlers):
         os.makedirs(log_dir, exist_ok=True)
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         fh = logging.FileHandler(os.path.join(log_dir, f"{name}_{ts}.log"))
@@ -39,10 +35,6 @@ def setup_logger(name: str, log_dir: str = None):
 
     return logger
 
-
-# ────────────────────────────────────────────────────────
-#  Running average meter
-# ────────────────────────────────────────────────────────
 
 class AverageMeter:
     """Computes and stores the running mean of a scalar."""
@@ -63,10 +55,6 @@ class AverageMeter:
         return self.sum / max(self.count, 1)
 
 
-# ────────────────────────────────────────────────────────
-#  Checkpoint helpers
-# ────────────────────────────────────────────────────────
-
 def save_checkpoint(state: dict, filename: str, ckpt_dir: str = CHECKPOINT_DIR):
     """Save a training checkpoint."""
     os.makedirs(ckpt_dir, exist_ok=True)
@@ -83,38 +71,31 @@ def load_checkpoint(filename: str, ckpt_dir: str = CHECKPOINT_DIR, map_location=
     return torch.load(path, map_location=map_location, weights_only=False)
 
 
-# ────────────────────────────────────────────────────────
-#  Denormalisation
-# ────────────────────────────────────────────────────────
-
-def denormalize_tir(tensor):
-    """[0, 1] → Kelvin  [250, 350]."""
-    return tensor * TIR_RANGE + TIR_MIN
+def denormalize_tir(tensor, stats=None):
+    """TIR z-score tensor back to Kelvin."""
+    stats = stats or load_preprocess_stats()
+    return stats.denormalize_tir_tensor(tensor)
 
 
-def denormalize_rgb(tensor):
-    """[-1, 1] → [0, 1]  (for Tanh output) or identity."""
+def denormalize_rgb(tensor, stats=None, original_scale=False):
+    """RGB model tensor to [0, 1], optionally back to original reference scale."""
+    stats = stats or load_preprocess_stats()
     if UNET_USE_TANH:
-        return (tensor + 1.0) / 2.0
+        tensor = (tensor + 1.0) / 2.0
+    if original_scale:
+        return stats.denormalize_rgb_tensor(tensor)
     return tensor
 
 
-# ────────────────────────────────────────────────────────
-#  Visualisation
-# ────────────────────────────────────────────────────────
-
 def tensor_to_numpy(t):
-    """Move tensor to CPU / numpy for plotting."""
+    """Move tensor to CPU and NumPy for plotting or metrics."""
     if isinstance(t, torch.Tensor):
         return t.detach().cpu().numpy()
     return t
 
 
 def create_sr_comparison(lr, sr, hr, save_path=None, title="SR comparison"):
-    """Plot LR → SR → HR triplet for one sample.
-
-    All inputs are 2-D numpy arrays in normalised [0,1] range.
-    """
+    """Plot LR, SR, and HR triplet for one sample in display range [0, 1]."""
     fig, axes = plt.subplots(1, 3, figsize=(15, 5))
     for ax, img, lbl in zip(axes, [lr, sr, hr], ["LR 200m", "SR 100m", "HR 100m (GT)"]):
         ax.imshow(img, cmap="inferno", vmin=0, vmax=1)
@@ -129,12 +110,7 @@ def create_sr_comparison(lr, sr, hr, save_path=None, title="SR comparison"):
 
 
 def create_color_comparison(tir, pred_rgb, gt_rgb, save_path=None, title="Colorization"):
-    """Plot TIR → Predicted RGB → Ground-truth RGB.
-
-    tir      : 2-D  [H, W]           normalised [0,1]
-    pred_rgb : 3-D  [3, H, W] or [H, W, 3]  in [0,1]
-    gt_rgb   : same as pred_rgb
-    """
+    """Plot TIR, predicted RGB, and ground-truth RGB in display range [0, 1]."""
     if pred_rgb.ndim == 3 and pred_rgb.shape[0] == 3:
         pred_rgb = np.moveaxis(pred_rgb, 0, -1)
     if gt_rgb.ndim == 3 and gt_rgb.shape[0] == 3:

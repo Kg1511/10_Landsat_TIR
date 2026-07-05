@@ -86,6 +86,7 @@ def evaluate_sr(ckpt_name: str):
     logger.info("Evaluating Super-Resolution on test set")
 
     test_ds = SRDataset(DATASET_ROOT, "test", augment=False)
+    stats = test_ds.stats
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False,
                              num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
 
@@ -104,14 +105,16 @@ def evaluate_sr(ckpt_name: str):
         lr = lr.to(DEVICE)
         hr = hr.to(DEVICE)
 
-        sr = model(lr).clamp(0, 1)
+        sr = model(lr)
 
-        sr_np = tensor_to_numpy(sr)[0, 0]
-        hr_np = tensor_to_numpy(hr)[0, 0]
-        lr_np = tensor_to_numpy(lr)[0, 0]
+        sr_np = tensor_to_numpy(stats.denormalize_tir_tensor(sr))[0, 0]
+        hr_np = tensor_to_numpy(stats.denormalize_tir_tensor(hr))[0, 0]
+        lr_norm_np = tensor_to_numpy(lr)[0, 0]
+        sr_norm_np = tensor_to_numpy(sr)[0, 0]
+        hr_norm_np = tensor_to_numpy(hr)[0, 0]
 
-        p = psnr_fn(hr_np, sr_np, data_range=1.0)
-        s = ssim_fn(hr_np, sr_np, data_range=1.0)
+        p = psnr_fn(hr_np, sr_np, data_range=stats.tir_range)
+        s = ssim_fn(hr_np, sr_np, data_range=stats.tir_range)
         psnrs.append(p)
         ssims.append(s)
         results.append({"name": names[0], "psnr": p, "ssim": s})
@@ -119,7 +122,9 @@ def evaluate_sr(ckpt_name: str):
         # Save first 10 visual comparisons
         if i < 10:
             create_sr_comparison(
-                lr_np, sr_np, hr_np,
+                stats.tir_to_display_array(lr_norm_np),
+                stats.tir_to_display_array(sr_norm_np),
+                stats.tir_to_display_array(hr_norm_np),
                 save_path=os.path.join(vis_dir, f"sr_test_{i:03d}.png"),
                 title=f"{names[0]} — PSNR {p:.2f}",
             )
@@ -157,6 +162,7 @@ def evaluate_colorization(ckpt_name: str):
     logger.info("Evaluating Colorization on test set")
 
     test_ds = ColorizationDataset(DATASET_ROOT, "test", augment=False)
+    stats = test_ds.stats
     test_loader = DataLoader(test_ds, batch_size=1, shuffle=False,
                              num_workers=NUM_WORKERS, pin_memory=PIN_MEMORY)
 
@@ -178,12 +184,12 @@ def evaluate_colorization(ckpt_name: str):
         rgb_pred = model(tir)
 
         # Denormalise
-        pred_01 = denormalize_rgb(rgb_pred).clamp(0, 1)
-        gt_01 = denormalize_rgb(rgb_gt).clamp(0, 1)
+        pred_01 = denormalize_rgb(rgb_pred, stats).clamp(0, 1)
+        gt_01 = denormalize_rgb(rgb_gt, stats).clamp(0, 1)
 
         pred_np = tensor_to_numpy(pred_01)[0].transpose(1, 2, 0)  # (H,W,3)
         gt_np = tensor_to_numpy(gt_01)[0].transpose(1, 2, 0)
-        tir_np = tensor_to_numpy(tir)[0, 0]
+        tir_np = stats.tir_to_display_array(tensor_to_numpy(tir)[0, 0])
 
         p = psnr_fn(gt_np, pred_np, data_range=1.0)
         s = ssim_fn(gt_np, pred_np, data_range=1.0, channel_axis=2)
